@@ -8,7 +8,7 @@ bzip2 = "0.6.1"
 flate2 = "1.1.10"
 live-region = "0.3.3"
 serde = { version = "1.0.229", features = ["derive"] }
-sevenz-rust2 = "0.24.1"
+sevenz-rust2 = "0.25.0"
 tar = "0.4.46"
 toml = "1.1.8"
 wxdragon = { version = "0.9.23", default-features = false }
