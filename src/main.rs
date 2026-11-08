@@ -500,18 +500,37 @@ fn refresh_tree(app: &Rc<App>) {
 
 /// Moves the current manager one row up (`delta == -1`) or down (`delta == 1`) and saves the order.
 fn move_manager(app: &Rc<App>, delta: isize) {
-	let position = {
+	let (moved, message) = {
 		let mut st = app.state.borrow_mut();
 		let mut order = st.config.managers();
 		let Some(from) = order.iter().position(|m| *m == st.current) else { return };
-		let Some(to) = from.checked_add_signed(delta).filter(|&to| to < order.len()) else { return };
+		let Some(to) = from.checked_add_signed(delta).filter(|&to| to < order.len()) else {
+			drop(st);
+			announce(app, if delta < 0 { "Cannot move up" } else { "Cannot move down" });
+			return;
+		};
 		order.swap(from, to);
+		let message = if to == 0 {
+			format!("Moved before {}", order[1].label())
+		} else if to == order.len() - 1 {
+			format!("Moved after {}", order[to - 1].label())
+		} else {
+			format!("Moved between {} and {}", order[to - 1].label(), order[to + 1].label())
+		};
 		st.config.manager_order = order;
-		to + 1
+		(st.current, message)
 	};
 	refresh_managers(app);
 	save_config(app);
-	announce(app, &format!("moved to position {position} of {}", Manager::ALL.len()));
+	// The list's own handling of the key may still move the selection afterwards (and switch
+	// `current` to the neighbour), so make sure the moved manager stays selected.
+	call_after(Box::new(move || {
+		if let Some(app) = APP.with(|a| a.borrow().clone()) {
+			app.state.borrow_mut().current = moved;
+			refresh_tree(&app);
+		}
+	}));
+	announce(app, &message);
 }
 
 fn refresh_packages(app: &Rc<App>) {
