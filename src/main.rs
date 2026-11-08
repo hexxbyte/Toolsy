@@ -960,7 +960,11 @@ fn custom_bucket_dialog(parent: &impl WxWidget) -> Option<Bucket> {
 	// Validated here so the dialog stays open until the input is acceptable.
 	ok.on_click(move |_| {
 		if !managers::valid_bucket_name(name.get_value().trim()) {
-			info(&dlg, "Enter a bucket name using only letters, digits, hyphens, underscores and dots.", "Invalid name");
+			info(
+				&dlg,
+				"Enter a bucket name using only letters, digits, hyphens, underscores and dots.",
+				"Invalid name",
+			);
 			name.set_focus();
 			return;
 		}
@@ -1020,7 +1024,13 @@ fn buckets_dialog(app: &Rc<App>) {
 				.iter()
 				.map(|name| {
 					let added = installed.iter().any(|b| b.name.eq_ignore_ascii_case(name));
-					BucketRow { name: name.clone(), source: String::new(), installed: added, selected: added, known: true }
+					BucketRow {
+						name: name.clone(),
+						source: String::new(),
+						installed: added,
+						selected: added,
+						known: true,
+					}
 				})
 				.collect();
 			for b in &installed {
@@ -1131,7 +1141,8 @@ fn buckets_dialog(app: &Rc<App>) {
 		return;
 	}
 	log(app, "=== Updating Scoop buckets ===");
-	let done: Done = Box::new(|app, ok| log(app, if ok { "=== Buckets updated ===" } else { "=== Finished with errors ===" }));
+	let done: Done =
+		Box::new(|app, ok| log(app, if ok { "=== Buckets updated ===" } else { "=== Finished with errors ===" }));
 	start_job(app, managers::bucket_script(&add, &remove), Some(done));
 }
 
