@@ -16,11 +16,12 @@ use std::{
 };
 
 use config::{Config, Manager, Package};
-use managers::{Hit, Msg};
+use managers::{Bucket, Hit, Msg};
 use wxdragon::prelude::*;
 
 type Then = Box<dyn FnOnce(&Rc<App>)>;
 type Done = Box<dyn FnOnce(&Rc<App>, bool)>;
+type BucketsCb = Box<dyn Fn(Vec<String>, Vec<Bucket>)>;
 
 struct State {
 	config: Config,
@@ -36,6 +37,7 @@ struct State {
 	jobs: HashMap<u64, Done>,
 	search_token: u64,
 	search_cb: Option<Box<dyn Fn(Vec<Hit>)>>,
+	buckets_cb: Option<BucketsCb>,
 }
 
 struct App {
@@ -63,6 +65,7 @@ const ID_TOGGLE: i32 = ID_HIGHEST + 11;
 const ID_INSTALL_MANAGER: i32 = ID_HIGHEST + 12;
 const ID_SETTINGS: i32 = ID_HIGHEST + 13;
 const ID_CUSTOM: i32 = ID_HIGHEST + 14;
+const ID_BUCKETS: i32 = ID_HIGHEST + 15;
 
 thread_local! {
 	static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
@@ -886,6 +889,246 @@ fn search_dialog(app: &Rc<App>, default_mgr: Manager) {
 	dlg.destroy();
 }
 
+/// A Scoop bucket in the buckets dialog.
+struct BucketRow {
+	name: String,
+	/// Git URL, only set for buckets that are not among Scoop's official ones.
+	source: String,
+	installed: bool,
+	selected: bool,
+	known: bool,
+}
+
+fn bucket_label(r: &BucketRow) -> String {
+	let mut label = r.name.clone();
+	if !r.known {
+		label.push_str(", custom");
+		if !r.source.is_empty() {
+			label.push_str(", ");
+			label.push_str(&r.source);
+		}
+	}
+	if r.selected {
+		label.push_str(", selected");
+	}
+	label
+}
+
+/// The buckets to add and the names to remove so Scoop matches the selection.
+fn bucket_changes(rows: &[BucketRow]) -> (Vec<Bucket>, Vec<String>) {
+	let add = rows
+		.iter()
+		.filter(|r| r.selected && !r.installed)
+		.map(|r| Bucket { name: r.name.clone(), source: r.source.clone() })
+		.collect();
+	let remove = rows.iter().filter(|r| !r.selected && r.installed).map(|r| r.name.clone()).collect();
+	(add, remove)
+}
+
+/// Asks for the name and git URL of a bucket that is not one of Scoop's official ones.
+fn custom_bucket_dialog(parent: &impl WxWidget) -> Option<Bucket> {
+	let dlg = Dialog::builder(parent, "Add custom bucket").with_size(560, 220).build();
+	let grid = FlexGridSizer::builder(0, 2).with_vgap(8).with_hgap(8).build();
+	grid.add_growable_col(1, 1);
+	macro_rules! row {
+		($label:expr, $field:expr) => {{
+			let st = StaticText::builder(&dlg).with_label($label).build();
+			let field = $field;
+			grid.add(&st, 0, SizerFlag::AlignCenterVertical, 0);
+			grid.add(&field, 1, SizerFlag::Expand, 0);
+			field
+		}};
+	}
+	let name = row!("Bucket &name:", TextCtrl::builder(&dlg).build());
+	let url = row!("Git &URL:", TextCtrl::builder(&dlg).build());
+	let ok = Button::builder(&dlg).with_label("OK").build();
+	let cancel = Button::builder(&dlg).with_label("Cancel").build();
+	let buttons = BoxSizer::builder(Orientation::Horizontal).build();
+	buttons.add_stretch_spacer(1);
+	buttons.add(&ok, 0, SizerFlag::All, 4);
+	buttons.add(&cancel, 0, SizerFlag::All, 4);
+	let top = BoxSizer::builder(Orientation::Vertical).build();
+	top.add_sizer(&grid, 0, SizerFlag::Expand | SizerFlag::All, 12);
+	top.add_stretch_spacer(1);
+	top.add_sizer(&buttons, 0, SizerFlag::Expand | SizerFlag::All, 8);
+	dlg.set_sizer(top, true);
+
+	ok.on_click(move |_| dlg.end_modal(ID_OK));
+	cancel.on_click(move |_| dlg.end_modal(ID_CANCEL));
+	dlg.set_affirmative_id(ID_OK);
+	dlg.set_escape_id(ID_CANCEL);
+
+	loop {
+		if dlg.show_modal() != ID_OK {
+			dlg.destroy();
+			return None;
+		}
+		let bname = name.get_value().trim().to_string();
+		let burl = url.get_value().trim().to_string();
+		if !managers::valid_bucket_name(&bname) {
+			info(&dlg, "Enter a bucket name using only letters, digits, hyphens, underscores and dots.", "Invalid name");
+			continue;
+		}
+		if !is_http_url(&burl) {
+			info(&dlg, "Enter a git URL that starts with http:// or https://.", "Invalid URL");
+			continue;
+		}
+		dlg.destroy();
+		return Some(Bucket { name: bname, source: burl });
+	}
+}
+
+/// Lists Scoop's official and added buckets; the ticked ones are applied when OK is pressed.
+#[allow(clippy::too_many_lines)]
+fn buckets_dialog(app: &Rc<App>) {
+	let dlg = Dialog::builder(&app.frame, "Scoop buckets").with_size(620, 480).build();
+	let status = StaticText::builder(&dlg).with_label("Loading buckets...").build();
+	let list_label = StaticText::builder(&dlg).with_label("Scoop &buckets").build();
+	let list = ListBox::builder(&dlg).build();
+	// Made after the list, so no screen reader takes it for its label.
+	let live = StaticText::builder(&dlg).with_label("").with_size(Size::new(0, 0)).build();
+	live.show(false);
+	let custom = Button::builder(&dlg).with_label("Add &custom bucket...").build();
+	let ok = Button::builder(&dlg).with_label("OK").build();
+	let cancel = Button::builder(&dlg).with_label("Cancel").build();
+	custom.enable(false);
+	ok.enable(false);
+
+	let bottom = BoxSizer::builder(Orientation::Horizontal).build();
+	bottom.add(&custom, 0, SizerFlag::All, 4);
+	bottom.add_stretch_spacer(1);
+	bottom.add(&ok, 0, SizerFlag::All, 4);
+	bottom.add(&cancel, 0, SizerFlag::All, 4);
+	let top = BoxSizer::builder(Orientation::Vertical).build();
+	top.add(&status, 0, SizerFlag::All, 8);
+	top.add(&list_label, 0, SizerFlag::Left, 8);
+	top.add(&list, 1, SizerFlag::Expand | SizerFlag::All, 8);
+	top.add_sizer(&bottom, 0, SizerFlag::Expand | SizerFlag::All, 6);
+	dlg.set_sizer(top, true);
+
+	let rows: Rc<RefCell<Vec<BucketRow>>> = Rc::new(RefCell::new(Vec::new()));
+	{
+		let rows = rows.clone();
+		app.state.borrow_mut().buckets_cb = Some(Box::new(move |known: Vec<String>, installed: Vec<Bucket>| {
+			let mut built: Vec<BucketRow> = known
+				.iter()
+				.map(|name| {
+					let added = installed.iter().any(|b| b.name.eq_ignore_ascii_case(name));
+					BucketRow { name: name.clone(), source: String::new(), installed: added, selected: added, known: true }
+				})
+				.collect();
+			for b in &installed {
+				if !known.iter().any(|name| name.eq_ignore_ascii_case(&b.name)) {
+					built.push(BucketRow {
+						name: b.name.clone(),
+						source: b.source.clone(),
+						installed: true,
+						selected: true,
+						known: false,
+					});
+				}
+			}
+			list.clear();
+			for r in &built {
+				list.append(&bucket_label(r));
+			}
+			if built.is_empty() {
+				status.set_label("Could not read the bucket list.");
+			} else {
+				list.set_selection(0, true);
+				status.set_label("Select the buckets you want with Space. Changes apply when you press OK.");
+				custom.enable(true);
+				ok.enable(true);
+			}
+			*rows.borrow_mut() = built;
+		}));
+	}
+	{
+		let rows = rows.clone();
+		list.on_key_down(move |event| {
+			if let WindowEventData::Keyboard(ref key) = event
+				&& key.get_key_code() == Some(WXK_SPACE)
+			{
+				if let Some(i) = list.get_selection() {
+					let i = i as usize;
+					if let Some(r) = rows.borrow_mut().get_mut(i) {
+						r.selected = !r.selected;
+						list.set_string(row_index(i), &bucket_label(r));
+						list.set_selection(row_index(i), true);
+						live_region::announce(live, if r.selected { "selected" } else { "not selected" });
+					}
+				}
+				return;
+			}
+			event.skip(true);
+		});
+	}
+	{
+		let rows = rows.clone();
+		custom.on_click(move |_| {
+			let Some(b) = custom_bucket_dialog(&dlg) else { return };
+			let existing = rows.borrow().iter().position(|r| r.name.eq_ignore_ascii_case(&b.name));
+			if let Some(i) = existing {
+				info(&dlg, "A bucket with that name is already in the list.", "Duplicate");
+				list.set_selection(row_index(i), true);
+				return;
+			}
+			let row = BucketRow { name: b.name, source: b.source, installed: false, selected: true, known: false };
+			list.append(&bucket_label(&row));
+			let index = rows.borrow().len();
+			rows.borrow_mut().push(row);
+			list.set_selection(row_index(index), true);
+			live_region::announce(live, "custom bucket added, selected");
+		});
+	}
+	{
+		let rows = rows.clone();
+		ok.on_click(move |_| {
+			// Confirmed here so that answering No leaves the dialog open on the list.
+			let (_, remove) = bucket_changes(&rows.borrow());
+			if !remove.is_empty() {
+				let mut msg = format!(
+					"Remove {}?\nApps installed from a removed bucket stay installed, but can no longer be updated.",
+					remove.join(", ")
+				);
+				if remove.iter().any(|n| n.eq_ignore_ascii_case("main")) {
+					msg.push_str("\n\nThe main bucket holds most common apps and Scoop itself relies on it.");
+				}
+				if !confirm(&dlg, &msg, "Remove buckets") {
+					list.set_focus();
+					return;
+				}
+			}
+			dlg.end_modal(ID_OK);
+		});
+	}
+	cancel.on_click(move |_| dlg.end_modal(ID_CANCEL));
+	dlg.set_affirmative_id(ID_OK);
+	dlg.set_escape_id(ID_CANCEL);
+
+	let tx = app.tx.clone();
+	std::thread::spawn(move || {
+		let (known, installed) = managers::buckets();
+		managers::emit(&tx, Msg::Buckets { known, installed });
+	});
+	list.set_focus();
+
+	let accepted = dlg.show_modal() == ID_OK;
+	app.state.borrow_mut().buckets_cb = None;
+	dlg.destroy();
+
+	if !accepted {
+		return;
+	}
+	let (add, remove) = bucket_changes(&rows.borrow());
+	if add.is_empty() && remove.is_empty() {
+		return;
+	}
+	log(app, "=== Updating Scoop buckets ===");
+	let done: Done = Box::new(|app, ok| log(app, if ok { "=== Buckets updated ===" } else { "=== Finished with errors ===" }));
+	start_job(app, managers::bucket_script(&add, &remove), Some(done));
+}
+
 // ---------------------------------------------------------------- actions
 
 fn add_manual(app: &Rc<App>) {
@@ -1034,6 +1277,7 @@ fn build_menu_bar(frame: &Frame) {
 		"Add a download URL for an installer or archive",
 		ItemKind::Normal,
 	);
+	packages.append(ID_BUCKETS, "Scoop &Buckets...\tCtrl+B", "Add or remove Scoop buckets", ItemKind::Normal);
 	packages.append_separator();
 	packages.append(ID_INSTALL_SELECTED, "&Install Selected	Ctrl+I", "Install the selected packages", ItemKind::Normal);
 	packages.append(ID_UPGRADE_SELECTED, "&Upgrade Selected	Ctrl+U", "Upgrade the selected packages", ItemKind::Normal);
@@ -1061,6 +1305,12 @@ fn append_install_manager(app: &App, menu: &Menu) {
 	}
 }
 
+fn append_buckets(app: &App, menu: &Menu) {
+	if app.state.borrow().current == Manager::Scoop {
+		menu.append(ID_BUCKETS, "Scoop &Buckets...", "", ItemKind::Normal);
+	}
+}
+
 fn show_package_menu(app: &Rc<App>) {
 	let mut menu = Menu::builder().build();
 	append_install_manager(app, &menu);
@@ -1075,6 +1325,7 @@ fn show_package_menu(app: &Rc<App>) {
 	menu.append(ID_SEARCH, "&Search and Add...", "", ItemKind::Normal);
 	menu.append(ID_MANUAL, "Add &Manually...", "", ItemKind::Normal);
 	menu.append(ID_CUSTOM, "Add &Custom Package...", "", ItemKind::Normal);
+	append_buckets(app, &menu);
 	app.packages.popup_menu(&mut menu, None);
 	menu.destroy_menu();
 }
@@ -1084,6 +1335,7 @@ fn show_manager_menu(app: &Rc<App>) {
 	append_install_manager(app, &menu);
 	menu.append(ID_UPGRADE_ALL, "Upgrade &All", "", ItemKind::Normal);
 	menu.append(ID_SEARCH, "&Search and Add...", "", ItemKind::Normal);
+	append_buckets(app, &menu);
 	app.managers_list.popup_menu(&mut menu, None);
 	menu.destroy_menu();
 }
@@ -1097,6 +1349,7 @@ fn handle_menu(app: &Rc<App>, id: i32) -> bool {
 		}
 		ID_MANUAL => add_manual(app),
 		ID_CUSTOM => add_custom(app),
+		ID_BUCKETS => ensure_manager(app, Manager::Scoop, Box::new(buckets_dialog)),
 		ID_INSTALL_SELECTED => run_packages(app, selected_packages(app), Action::Install),
 		ID_UPGRADE_SELECTED => run_packages(app, selected_packages(app), Action::Upgrade),
 		ID_UPGRADE_ALL => upgrade_current(app),
@@ -1140,6 +1393,12 @@ fn handle_msg(app: &Rc<App>, msg: Msg) {
 				&& let Some(cb) = &st.search_cb
 			{
 				cb(hits);
+			}
+		}
+		Msg::Buckets { known, installed } => {
+			let st = app.state.borrow();
+			if let Some(cb) = &st.buckets_cb {
+				cb(known, installed);
 			}
 		}
 	}
@@ -1218,6 +1477,7 @@ fn main() {
 				jobs: HashMap::new(),
 				search_token: 0,
 				search_cb: None,
+				buckets_cb: None,
 			}),
 		});
 		APP.with(|a| *a.borrow_mut() = Some(app.clone()));

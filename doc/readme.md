@@ -35,6 +35,20 @@ Enter a package name and a download URL.
 
 See [Custom packages](#custom-packages) for details.
 
+### Scoop Buckets - Ctrl+B
+
+Opens a list of Scoop's official buckets, along with any custom buckets you have already added. The buckets Scoop currently has are selected.
+
+Also available from the context menu of either list when Scoop is the selected manager. If Scoop is not installed, Toolsy offers to install it first.
+
+1. Press Space on a bucket to select or deselect it.
+2. To add a bucket that is not in the list, choose Add custom bucket, then enter a name (letters, digits, hyphens, underscores and dots) and the bucket's git URL (`http` or `https`). It is added to the list already selected.
+3. Choose OK to apply your changes.
+
+Toolsy then adds the newly selected buckets and removes the ones you deselected, and shows the output in the Output box. If git is not installed, Toolsy installs it with Scoop first, since buckets need it.
+
+Before removing a bucket, Toolsy asks for confirmation. Apps installed from a removed bucket stay installed, but Scoop can no longer update them.
+
 ### Edit - F2
 
 Edit the exact package identifier and its parameters.

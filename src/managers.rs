@@ -1,4 +1,5 @@
 use std::{
+	fmt::Write as _,
 	io::Read,
 	os::windows::process::CommandExt,
 	path::Path,
@@ -20,6 +21,7 @@ pub enum Msg {
 	Line(String),
 	Done { job: u64, ok: bool },
 	Search { token: u64, hits: Vec<Hit> },
+	Buckets { known: Vec<String>, installed: Vec<Bucket> },
 }
 
 /// Sends a message to the UI thread and wakes its event loop to deliver it.
@@ -35,6 +37,13 @@ pub struct Hit {
 	pub name: String,
 	pub id: String,
 	pub version: String,
+}
+
+/// A Scoop bucket; `source` is the git URL (empty when it is not known).
+#[derive(Clone, Debug)]
+pub struct Bucket {
+	pub name: String,
+	pub source: String,
 }
 
 /// PowerShell reading its script from stdin (avoids all quoting problems).
@@ -290,6 +299,58 @@ pub fn search(m: Manager, query: &str) -> Vec<Hit> {
 				.collect()
 		}
 	}
+}
+
+/// Scoop's official bucket names and the buckets currently added (blocking; run on a worker thread).
+pub fn buckets() -> (Vec<String>, Vec<Bucket>) {
+	// Scoop may print warnings among the results, so keep only lines that are valid bucket names.
+	let known = capture("scoop bucket known")
+		.lines()
+		.map(str::trim)
+		.filter(|l| valid_bucket_name(l))
+		.map(String::from)
+		.collect();
+	let installed = capture("scoop bucket list | ForEach-Object { \"$($_.Name)|$($_.Source)\" }")
+		.lines()
+		.filter_map(|l| {
+			let (name, source) = l.trim().split_once('|')?;
+			valid_bucket_name(name).then(|| Bucket { name: name.into(), source: source.trim().into() })
+		})
+		.collect();
+	(known, installed)
+}
+
+/// Bucket names are letters, digits, hyphens, underscores and dots.
+pub fn valid_bucket_name(name: &str) -> bool {
+	!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Script that adds and removes Scoop buckets (git is installed first when buckets are added without it).
+pub fn bucket_script(add: &[Bucket], remove: &[String]) -> String {
+	let mut script = String::new();
+	if !add.is_empty() {
+		script.push_str(
+			"if(-not (Get-Command git -ErrorAction SilentlyContinue)){ Write-Host '>>> install git'; scoop install git }\n",
+		);
+	}
+	for b in add {
+		let source = if b.source.is_empty() { String::new() } else { format!(" {}", quote(&b.source)) };
+		let _ = writeln!(
+			script,
+			"Write-Host '>>> add bucket {}'; scoop bucket add {}{source}; if($LASTEXITCODE -ne 0){{ Write-Host 'FAILED (exit code' $LASTEXITCODE ')' }}",
+			b.name.replace('\'', "''"),
+			quote(&b.name),
+		);
+	}
+	for name in remove {
+		let _ = writeln!(
+			script,
+			"Write-Host '>>> remove bucket {}'; scoop bucket rm {}; if($LASTEXITCODE -ne 0){{ Write-Host 'FAILED (exit code' $LASTEXITCODE ')' }}",
+			name.replace('\'', "''"),
+			quote(name),
+		);
+	}
+	script
 }
 
 fn parse_winget(text: &str) -> Vec<Hit> {
