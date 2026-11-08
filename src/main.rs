@@ -621,32 +621,34 @@ fn package_dialog(app: &Rc<App>, title: &str, initial: Option<&Package>, default
 	top.add_sizer(&buttons, 0, SizerFlag::Expand | SizerFlag::All, 8);
 	dlg.set_sizer(top, true);
 
-	ok.on_click(move |_| dlg.end_modal(ID_OK));
+	// Validated here so the dialog stays open until the input is acceptable.
+	ok.on_click(move |_| {
+		if id.get_value().trim().is_empty() {
+			info(&dlg, "The package identifier is required.", "Missing identifier");
+			id.set_focus();
+			return;
+		}
+		dlg.end_modal(ID_OK);
+	});
 	cancel.on_click(move |_| dlg.end_modal(ID_CANCEL));
 	dlg.set_affirmative_id(ID_OK);
 	dlg.set_escape_id(ID_CANCEL);
 
-	loop {
-		if dlg.show_modal() != ID_OK {
-			dlg.destroy();
-			return None;
-		}
-		let m = Manager::REAL[mgr.get_selection().unwrap_or(0) as usize];
-		let pid = id.get_value().trim().to_string();
-		let pname = name.get_value().trim().to_string();
-		if pid.is_empty() {
-			info(&dlg, "The package identifier is required.", "Missing identifier");
-			continue;
-		}
-		let result = Package {
-			manager: m,
-			name: if pname.is_empty() { pid.clone() } else { pname },
-			id: pid,
-			args: args.get_value().trim().to_string(),
-		};
+	if dlg.show_modal() != ID_OK {
 		dlg.destroy();
-		return Some(result);
+		return None;
 	}
+	let m = Manager::REAL[mgr.get_selection().unwrap_or(0) as usize];
+	let pid = id.get_value().trim().to_string();
+	let pname = name.get_value().trim().to_string();
+	let result = Package {
+		manager: m,
+		name: if pname.is_empty() { pid.clone() } else { pname },
+		id: pid,
+		args: args.get_value().trim().to_string(),
+	};
+	dlg.destroy();
+	Some(result)
 }
 
 /// Add/edit dialog for custom (download URL) packages.
@@ -686,31 +688,33 @@ fn custom_dialog(app: &Rc<App>, title: &str, initial: Option<&Package>) -> Optio
 	top.add_sizer(&buttons, 0, SizerFlag::Expand | SizerFlag::All, 8);
 	dlg.set_sizer(top, true);
 
-	ok.on_click(move |_| dlg.end_modal(ID_OK));
+	// Validated here so the dialog stays open until the input is acceptable.
+	ok.on_click(move |_| {
+		if !is_http_url(url.get_value().trim()) {
+			info(&dlg, "Enter a download URL that starts with http:// or https://.", "Invalid URL");
+			url.set_focus();
+			return;
+		}
+		dlg.end_modal(ID_OK);
+	});
 	cancel.on_click(move |_| dlg.end_modal(ID_CANCEL));
 	dlg.set_affirmative_id(ID_OK);
 	dlg.set_escape_id(ID_CANCEL);
 
-	loop {
-		if dlg.show_modal() != ID_OK {
-			dlg.destroy();
-			return None;
-		}
-		let purl = url.get_value().trim().to_string();
-		let pname = name.get_value().trim().to_string();
-		if !is_http_url(&purl) {
-			info(&dlg, "Enter a download URL that starts with http:// or https://.", "Invalid URL");
-			continue;
-		}
-		let result = Package {
-			manager: Manager::Custom,
-			name: if pname.is_empty() { url_file_name(&purl) } else { pname },
-			id: purl,
-			args: String::new(),
-		};
+	if dlg.show_modal() != ID_OK {
 		dlg.destroy();
-		return Some(result);
+		return None;
 	}
+	let purl = url.get_value().trim().to_string();
+	let pname = name.get_value().trim().to_string();
+	let result = Package {
+		manager: Manager::Custom,
+		name: if pname.is_empty() { url_file_name(&purl) } else { pname },
+		id: purl,
+		args: String::new(),
+	};
+	dlg.destroy();
+	Some(result)
 }
 
 fn hit_label(h: &Hit, selected: bool) -> String {
@@ -953,29 +957,31 @@ fn custom_bucket_dialog(parent: &impl WxWidget) -> Option<Bucket> {
 	top.add_sizer(&buttons, 0, SizerFlag::Expand | SizerFlag::All, 8);
 	dlg.set_sizer(top, true);
 
-	ok.on_click(move |_| dlg.end_modal(ID_OK));
+	// Validated here so the dialog stays open until the input is acceptable.
+	ok.on_click(move |_| {
+		if !managers::valid_bucket_name(name.get_value().trim()) {
+			info(&dlg, "Enter a bucket name using only letters, digits, hyphens, underscores and dots.", "Invalid name");
+			name.set_focus();
+			return;
+		}
+		if !is_http_url(url.get_value().trim()) {
+			info(&dlg, "Enter a git URL that starts with http:// or https://.", "Invalid URL");
+			url.set_focus();
+			return;
+		}
+		dlg.end_modal(ID_OK);
+	});
 	cancel.on_click(move |_| dlg.end_modal(ID_CANCEL));
 	dlg.set_affirmative_id(ID_OK);
 	dlg.set_escape_id(ID_CANCEL);
 
-	loop {
-		if dlg.show_modal() != ID_OK {
-			dlg.destroy();
-			return None;
-		}
-		let bname = name.get_value().trim().to_string();
-		let burl = url.get_value().trim().to_string();
-		if !managers::valid_bucket_name(&bname) {
-			info(&dlg, "Enter a bucket name using only letters, digits, hyphens, underscores and dots.", "Invalid name");
-			continue;
-		}
-		if !is_http_url(&burl) {
-			info(&dlg, "Enter a git URL that starts with http:// or https://.", "Invalid URL");
-			continue;
-		}
+	if dlg.show_modal() != ID_OK {
 		dlg.destroy();
-		return Some(Bucket { name: bname, source: burl });
+		return None;
 	}
+	let result = Bucket { name: name.get_value().trim().to_string(), source: url.get_value().trim().to_string() };
+	dlg.destroy();
+	Some(result)
 }
 
 /// Lists Scoop's official and added buckets; the ticked ones are applied when OK is pressed.
